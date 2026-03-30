@@ -24,6 +24,15 @@ class TraeClient {
         "app",
         "product.json",
       );
+    this.localEnvPath =
+      options.localEnvPath ||
+      path.join(
+        resolveWindowsPath("APPDATA", "AppData", "Roaming"),
+        "Trae",
+        "ModularData",
+        "ckg_server",
+        "local_env.json",
+      );
     this.debug = options.debug === true;
     this.requestTimeoutMs = Number(options.requestTimeoutMs || 120000);
   }
@@ -36,6 +45,14 @@ class TraeClient {
 
   readProduct() {
     return loadJsonFile(fs, this.productPath);
+  }
+
+  readLocalEnv() {
+    if (!fs.existsSync(this.localEnvPath)) {
+      return {};
+    }
+
+    return loadJsonFile(fs, this.localEnvPath);
   }
 
   getBaseDomain(service = "agent") {
@@ -51,6 +68,8 @@ class TraeClient {
     if (service === "ide") {
       candidates.push(product?.bootConfig?.iCubeAgent?.[region]);
       candidates.push(product?.bootConfig?.iCubeAgent?.normal);
+      candidates.push(product?.bootConfig?.agent?.trae?.[region]);
+      candidates.push(product?.bootConfig?.agent?.trae?.normal);
     }
 
     if (service === "agent") {
@@ -67,6 +86,32 @@ class TraeClient {
 
     candidates.push(auth?.host);
     return candidates.filter(Boolean);
+  }
+
+  getRuntimeProfile(options = {}) {
+    const auth = this.readAuth();
+    const product = this.readProduct();
+    const storage = loadJsonFile(fs, this.storagePath);
+    const localEnv = this.readLocalEnv();
+    const defaultModel = typeof options.defaultModel === "string" && options.defaultModel.trim()
+      ? options.defaultModel.trim()
+      : "gemini-3.1-pro";
+
+    return {
+      userId: auth?.userId || auth?.account?.id || "",
+      deviceId: String(localEnv?.device_id || "7601457059360212498"),
+      machineId: storage?.["telemetry.machineId"] || "841ab318d31a4bf20206cd8084f3fcc82d423d93accf291abd14934c6ed6244f",
+      ideVersion: product?.appVersion || "3.5.42",
+      ideVersionCode: "20260324",
+      appVersion: "default",
+      appVersionCode: "20260324",
+      ideVersionType: product?.quality || "stable",
+      pluginChannel: product?.quality || "stable",
+      appLanguage: "en",
+      agentType: "builder_v3",
+      defaultModel,
+      defaultConfigName: defaultModel,
+    };
   }
 
   getAuthState() {
@@ -91,6 +136,7 @@ class TraeClient {
 
   createHeaders(extra = {}) {
     const auth = this.readAuth();
+    const profile = this.getRuntimeProfile({});
     const traceId = extra.traceId || createTraceId();
     const requestId = extra.requestId || createRequestId();
 
@@ -98,17 +144,17 @@ class TraeClient {
       Authorization: `Cloud-IDE-JWT ${auth.token}`,
       "x-ide-token": auth.token,
       "x-app-id": "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8",
-      "x-app-version": "default",
-      "x-app-version-code": "20260324",
-      "x-ide-version-code": "20260324",
-      "x-device-id": "7601457059360212498",
-      "x-machine-id": "841ab318d31a4bf20206cd8084f3fcc82d423d93accf291abd14934c6ed6244f",
+      "x-app-version": profile.appVersion,
+      "x-app-version-code": profile.appVersionCode,
+      "x-ide-version-code": profile.ideVersionCode,
+      "x-device-id": profile.deviceId,
+      "x-machine-id": profile.machineId,
       "x-os-version": "Windows 11 Pro",
       "x-device-type": "windows",
       "x-device-brand": "___________________",
       "x-device-cpu": "Unknown",
-      "x-ide-version": "3.5.42",
-      "x-ide-version-type": "stable",
+      "x-ide-version": profile.ideVersion,
+      "x-ide-version-type": profile.ideVersionType,
       "request-traffic-type": "prod",
       "x-custom-trace-id": traceId,
       "x-request-id": requestId,
@@ -200,18 +246,26 @@ class TraeClient {
     }
   }
 
-  async getDetailParam(functionName = "chat_v3") {
+  async getDetailParam(functionName = "chat_v3", options = {}) {
+    const configName = typeof options.configName === "string" && options.configName.trim()
+      ? options.configName.trim()
+      : null;
     return this.requestJson("/api/ide/v1/get_detail_param", {
       function: functionName,
       config_names: null,
-      need_prompt: false,
-      current_config_info: null,
+      need_prompt: options.needPrompt === true,
+      current_config_info: configName
+        ? {
+            config_name: configName,
+            is_custom_model: false,
+          }
+        : null,
       poly_prompt: true,
-      mode_type: "Manual",
-      agent_type: null,
+      mode_type: options.modeType || "Max",
+      agent_type: options.agentType || "builder_v3",
       ab_force_vids: null,
       ab_autotest_advanced_mode: null,
-    }, { service: "ide" });
+    }, { service: options.service || "agent" });
   }
 
   async createAgentTask(payload) {

@@ -125,6 +125,13 @@ function createGateway(config = createConfig()) {
         });
       }
 
+      if (request.method === "GET" && url.pathname === "/debug/models") {
+        return json(response, 200, {
+          object: "list",
+          data: modelDiscovery.discover(),
+        });
+      }
+
       if (request.method === "POST" && url.pathname === "/debug/agent/v3/create_agent_task") {
         const body = await readJsonBody(request);
         return proxyRawSse(response, await trae.createAgentTask(body));
@@ -147,6 +154,7 @@ function createGateway(config = createConfig()) {
           openaiRequest,
           requestHeaders: request.headers,
           config,
+          modelDiscovery,
           trae,
           sessionStore,
         });
@@ -176,11 +184,12 @@ async function handleOpenAiChat({
   openaiRequest,
   requestHeaders,
   config,
+  modelDiscovery,
   trae,
   sessionStore,
 }) {
   const stream = openaiRequest.stream === true;
-  const model = openaiRequest.model || "trae-agent";
+  const model = resolveRequestedModel(openaiRequest.model, modelDiscovery.discover());
   const continuationRequest = isToolResultRequest(openaiRequest.messages);
   const prompt = continuationRequest ? "" : flattenMessages(openaiRequest.messages);
 
@@ -226,11 +235,13 @@ async function handleOpenAiChat({
     prompt,
     model,
     session_id: conversation?.session_id || createObjectId(),
+    conversation_id: conversation?.conversation_id || createObjectId(),
     task_id: createObjectId(),
     message_id: createObjectId(),
     trace_id: createTraceId(),
     request_id: createRequestId(),
   };
+  const runtimeProfile = trae.getRuntimeProfile({ defaultModel: model });
 
   let result;
   if (continuationRequest) {
@@ -257,6 +268,7 @@ async function handleOpenAiChat({
         runtimeVars,
         prompt,
         model,
+        profile: runtimeProfile,
       }),
     );
   } else if (config.mode === "agent-v3-template") {
@@ -317,6 +329,24 @@ async function handleOpenAiChat({
   }
 
   return proxyTraeSseAsOpenAiJson(response, result, model, persistConversation);
+}
+
+function resolveRequestedModel(requestedModel, discoveredModels) {
+  const candidate = typeof requestedModel === "string" ? requestedModel.trim() : "";
+  if (candidate && candidate !== "trae-agent") {
+    return candidate;
+  }
+
+  const discovered = Array.isArray(discoveredModels) ? discoveredModels : [];
+  const preferredModel = discovered.find(
+    (entry) => entry?.selected && entry?.id && entry.id !== "trae-agent",
+  );
+  if (preferredModel?.id) {
+    return preferredModel.id;
+  }
+
+  const firstRealModel = discovered.find((entry) => entry?.id && entry.id !== "trae-agent");
+  return firstRealModel?.id || "gemini-3.1-pro";
 }
 
 function buildTemplatePayload(templatePath, runtimeVars) {
@@ -595,4 +625,5 @@ module.exports = {
   createGateway,
   loadDotEnv,
   mapUpstreamError,
+  resolveRequestedModel,
 };
