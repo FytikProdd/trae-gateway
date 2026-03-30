@@ -129,17 +129,35 @@ Missing pieces:
 
 Current state:
 
-- `GET /v1/models` now discovers recently observed models from local Trae logs
+- `GET /v1/models` now reads the selected model and model catalog from local Trae state in `state.vscdb`
+- recent renderer-log observations are still merged in as supplemental signals
+- `model: "trae-agent"` or an empty model now resolves to the currently selected Trae builder model
+- `GET /debug/models` exposes the merged discovery state used by the gateway
 - tool capability hints can now be inferred from recent Trae tool-call activity
 
 Missing pieces:
 
-- discover actual available Trae models
+- fetch the live model config that Trae itself associates with the selected model
 - describe capabilities such as tool use, multimodal support, and reasoning support
+- remove the remaining dependency on reverse-engineered config bootstrap
 
 `1.0` requirement:
 
 - model list should reflect reality, not placeholders
+
+## Confirmed runtime blocker
+
+Validated on March 30, 2026:
+
+- the selected model can now be read locally from Trae state and used as the gateway default
+- on this machine that default resolves to `gemini-3.1-pro`
+- direct external `get_detail_param` calls still fail with `HTTP 400` and an empty body
+- because of that, the chat path still collapses into `model config is empty for model name: gemini-3.1-pro`
+
+Practical implication:
+
+- model discovery is no longer the main `1.0` blocker
+- the remaining blocker is obtaining the same live model-config payload that the Trae desktop runtime already knows how to access internally
 
 ### 8. Tests
 
