@@ -29,7 +29,7 @@ function createRequestId() {
   return crypto.randomUUID();
 }
 
-function nowUnix() {
+function toUnixSeconds() {
   return Math.floor(Date.now() / 1000);
 }
 
@@ -215,9 +215,9 @@ module.exports = {
   flattenMessages,
   json,
   loadJsonFile,
-  nowUnix,
   parseJson,
   sanitizeAuthInfo,
   sseHeaders,
   text,
+  toUnixSeconds,
 };

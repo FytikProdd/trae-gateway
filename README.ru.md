@@ -19,18 +19,18 @@
 - реализована OpenAI-совместимая API-поверхность
 - реализован raw passthrough в приватные endpoint'ы Trae
 - стандартный `agent-v3` чат теперь можно отправлять без захваченного template через встроенный builder payload'а
+- persistence сессий теперь сохраняет стабильное сопоставление внешнего диалога с Trae `session_id` в локальном store
+- SSE parser теперь умеет отдавать OpenAI `tool_calls`, когда в событиях Trae видны блоки с `tool_id` / `tool_type`
+- выбор upstream domain теперь опирается на реальные Trae boot domains из установленного `product.json`, а не на один жёстко прошитый host
+- `GET /v1/models` теперь возвращает недавно замеченные реальные модели Trae из локальных Trae логов вместо статических заглушек
 - template-based forwarding оставлен как fallback для реверс-инжиниринга и на случай дрейфа приватной схемы upstream
 
 Что ещё не закрыто до `1.0`:
 
 - полный tool-call loop: принять tool call, выполнить его, вернуть результат через `/api/agent/v3/commit_toolcall_result`
-- стабильный Trae SSE/event parsing без эвристического извлечения текста
-- refresh токена и корректная обработка протухших Trae-сессий
-- стабильное сопоставление OpenAI-запросов с `session_id` / `task_id` / `message_id` на стороне Trae
-- консистентное поведение между streaming и non-streaming режимами
-- корректное отображение upstream-ошибок для auth, rate limit, timeout и invalid payload
-- discovery реальных моделей/возможностей вместо статических placeholder-моделей
-- тесты для загрузки auth, template rendering, SSE parsing и upstream failure paths
+- refresh токена и автоматическое восстановление протухших Trae-сессий
+- полное детерминированное переиспользование Trae `task_id` / `message_id` / follow-up state
+- более широкие тесты для загрузки auth, template rendering, live upstream поведения и failure paths
 
 Подробный roadmap: [docs/ROADMAP.ru.md](./docs/ROADMAP.ru.md)
 
@@ -77,6 +77,8 @@ Invoke-WebRequest http://127.0.0.1:4317/v1/models
 - `TRAE_RAW_CHAT_TEMPLATE_PATH`
 - `TRAE_STORAGE_PATH`
 - `TRAE_PRODUCT_PATH`
+- `TRAE_SESSION_STORE_PATH`
+- `TRAE_REQUEST_TIMEOUT_MS`
 - `TRAE_DEBUG`
 
 Значения `TRAE_PROXY_MODE`:
@@ -109,6 +111,8 @@ Gateway заменяет плейсхолдеры в любом месте JSON-
 ## Заметки
 
 - Trae использует приватные endpoint'ы, например `/api/agent/v3/create_agent_task`.
-- Встроенный auto-payload сейчас в первую очередь рассчитан на обычный текстовый чат; выполнение tools пока не завершено.
+- Встроенный auto-payload сейчас в первую очередь рассчитан на обычный текстовый чат; выполнение tools и commit результатов пока не завершены.
+- Gateway сохраняет mapping между разговором и Trae-сессией в `TRAE_SESSION_STORE_PATH` или `.trae-gateway-sessions.json`.
+- `GET /v1/models` теперь строится по недавней локальной активности Trae, поэтому список отражает реально замеченные модели, а не захардкоженный каталог.
 - Продолжение tool call обычно идёт через `/api/agent/v3/commit_toolcall_result`.
-- Gateway пока использует эвристики для извлечения текста из Trae SSE chunks, поэтому точные схемы событий ещё нужно стабилизировать.
+- Точные схемы Trae SSE всё ещё требуют стабилизации, но parser уже умеет разбирать multi-line SSE frames, вытаскивать стабильные id и распознавать tool-call блоки.

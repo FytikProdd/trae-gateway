@@ -38,7 +38,8 @@ Why this matters:
 Current state:
 
 - raw passthrough for `/api/agent/v3/commit_toolcall_result` exists
-- there is no complete OpenAI-compatible tool execution loop
+- Trae event parsing can now surface OpenAI-style `tool_calls` when tool metadata is present in upstream events
+- there is still no complete OpenAI-compatible tool execution loop
 
 Missing pieces:
 
@@ -56,9 +57,9 @@ Missing pieces:
 
 Current state:
 
-- text extraction is heuristic
-- nested payloads may produce duplicates or noisy text
-- reasoning/content split is not modeled precisely
+- the SSE parser now handles multi-line frames, stable id extraction, and tool-call block detection
+- text extraction still depends on heuristics because the full upstream schema remains private
+- reasoning/content split is still not modeled precisely
 
 Why this matters:
 
@@ -74,7 +75,8 @@ Why this matters:
 Current state:
 
 - the gateway reads the current JWT from the local Trae profile
-- it does not actively refresh credentials
+- it now detects expired local auth before sending upstream requests and returns a clear auth error
+- it still does not actively refresh credentials
 
 Risks:
 
@@ -90,8 +92,9 @@ Risks:
 
 Current state:
 
-- IDs are generated locally for templated requests
-- there is no persistent mapping layer between external conversations and Trae sessions
+- session mapping is now persisted locally for external conversation ids
+- `session_id` reuse is now stable when the client provides a repeatable conversation key
+- follow-up state reuse is still incomplete for all Trae-side ids
 
 Missing pieces:
 
@@ -107,8 +110,9 @@ Missing pieces:
 
 Current state:
 
-- basic upstream pass/fail behavior exists
-- error mapping is still minimal
+- upstream errors are now mapped into explicit auth, rate limit, timeout, server, and invalid request classes
+- request timeout handling is now built into the client
+- endpoint routing now falls back across Trae boot domains from the installed product config
 
 Missing pieces:
 
@@ -126,7 +130,8 @@ Missing pieces:
 
 Current state:
 
-- `GET /v1/models` returns placeholder entries
+- `GET /v1/models` now discovers recently observed models from local Trae logs
+- tool capability hints can now be inferred from recent Trae tool-call activity
 
 Missing pieces:
 
@@ -141,7 +146,7 @@ Missing pieces:
 
 Current state:
 
-- no automated test suite yet
+- automated tests now cover payload generation, SSE parsing, session persistence, and log-based model discovery
 
 Minimum test coverage for `1.0`:
 

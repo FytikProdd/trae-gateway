@@ -25,6 +25,7 @@ class TraeClient {
         "product.json",
       );
     this.debug = options.debug === true;
+    this.requestTimeoutMs = Number(options.requestTimeoutMs || 120000);
   }
 
   readAuth() {
@@ -37,14 +38,55 @@ class TraeClient {
     return loadJsonFile(fs, this.productPath);
   }
 
-  getBaseDomain() {
+  getBaseDomain(service = "agent") {
+    return this.getBaseDomains(service)[0];
+  }
+
+  getBaseDomains(service = "agent") {
     const auth = this.readAuth();
-    if (auth?.host) {
-      return auth.host;
+    const product = this.readProduct();
+    const region = auth?.userRegion?._aiRegion || auth?.userRegion?.region || "SG";
+    const candidates = [];
+
+    if (service === "ide") {
+      candidates.push(product?.bootConfig?.iCubeAgent?.[region]);
+      candidates.push(product?.bootConfig?.iCubeAgent?.normal);
     }
 
-    const product = this.readProduct();
-    return product?.agent?.domain || "https://coresg-normal.trae.ai";
+    if (service === "agent") {
+      candidates.push(product?.bootConfig?.agent?.trae?.[region]);
+      candidates.push(product?.bootConfig?.agent?.trae?.normal);
+    }
+
+    if (service === "raw-chat") {
+      candidates.push(product?.bootConfig?.cue?.trae?.[region]);
+      candidates.push(product?.bootConfig?.cue?.trae?.normal);
+      candidates.push(product?.bootConfig?.agent?.trae?.[region]);
+      candidates.push(product?.bootConfig?.agent?.trae?.normal);
+    }
+
+    candidates.push(auth?.host);
+    return candidates.filter(Boolean);
+  }
+
+  getAuthState() {
+    const auth = this.readAuth();
+    if (!auth?.token) {
+      return {
+        ok: false,
+        message: "Trae auth token is missing in the local profile.",
+      };
+    }
+
+    if (auth.expiredAt && new Date(auth.expiredAt).getTime() <= Date.now()) {
+      return {
+        ok: false,
+        message:
+          "Trae auth token is expired in the local profile. Open Trae and refresh the session before using the gateway.",
+      };
+    }
+
+    return { ok: true };
   }
 
   createHeaders(extra = {}) {
@@ -76,49 +118,86 @@ class TraeClient {
   }
 
   async requestJson(endpointPath, body, options = {}) {
-    const base = this.getBaseDomain().replace(/\/+$/, "");
-    const url = endpointPath.startsWith("http") ? endpointPath : `${base}${endpointPath}`;
-    const headers = this.createHeaders(options);
-
-    const response = await fetch(url, {
-      method: options.method || "POST",
-      headers,
-      body: body == null ? undefined : JSON.stringify(body),
-    });
-
-    const rawText = await response.text();
-    const parsed = parseJson(rawText, null);
-
-    return {
-      ok: response.ok,
-      status: response.status,
-      url,
-      headers: Object.fromEntries(response.headers.entries()),
-      text: rawText,
-      data: parsed,
-      requestHeaders: headers,
-    };
+    return this.requestWithFallback("json", endpointPath, body, options);
   }
 
   async requestSse(endpointPath, body, options = {}) {
-    const base = this.getBaseDomain().replace(/\/+$/, "");
-    const url = endpointPath.startsWith("http") ? endpointPath : `${base}${endpointPath}`;
+    return this.requestWithFallback("sse", endpointPath, body, options);
+  }
+
+  async requestWithFallback(kind, endpointPath, body, options = {}) {
     const headers = this.createHeaders(options);
+    const bases = endpointPath.startsWith("http")
+      ? [""]
+      : this.getBaseDomains(options.service || "agent");
+    let lastResult = null;
 
-    const response = await fetch(url, {
-      method: options.method || "POST",
-      headers,
-      body: body == null ? undefined : JSON.stringify(body),
-    });
+    for (const base of bases) {
+      const url = endpointPath.startsWith("http")
+        ? endpointPath
+        : `${String(base).replace(/\/+$/, "")}${endpointPath}`;
+      const result = await this.performFetch(kind, url, headers, body, options);
+      lastResult = result;
 
-    return {
-      ok: response.ok,
-      status: response.status,
-      url,
-      headers: Object.fromEntries(response.headers.entries()),
-      body: response.body,
-      requestHeaders: headers,
-    };
+      if (result.ok || !isRetryableUpstreamMiss(result.status)) {
+        return result;
+      }
+    }
+
+    return lastResult;
+  }
+
+  async performFetch(kind, url, headers, body, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort("timeout"), this.requestTimeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        method: options.method || "POST",
+        headers,
+        body: body == null ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (kind === "sse") {
+        return {
+          ok: response.ok,
+          status: response.status,
+          url,
+          headers: Object.fromEntries(response.headers.entries()),
+          body: response.body,
+          requestHeaders: headers,
+        };
+      }
+
+      const rawText = await response.text();
+      const parsed = parseJson(rawText, null);
+
+      return {
+        ok: response.ok,
+        status: response.status,
+        url,
+        headers: Object.fromEntries(response.headers.entries()),
+        text: rawText,
+        data: parsed,
+        requestHeaders: headers,
+      };
+    } catch (error) {
+      const timedOut =
+        error?.name === "AbortError" || error === "timeout" || String(error).includes("timeout");
+
+      return {
+        ok: false,
+        status: timedOut ? 408 : 502,
+        url,
+        headers: {},
+        text: error instanceof Error ? error.message : String(error),
+        requestHeaders: headers,
+        errorCode: timedOut ? "ETIMEDOUT" : "EUPSTREAM",
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   async getDetailParam(functionName = "chat_v3") {
@@ -132,20 +211,26 @@ class TraeClient {
       agent_type: null,
       ab_force_vids: null,
       ab_autotest_advanced_mode: null,
-    });
+    }, { service: "ide" });
   }
 
   async createAgentTask(payload) {
-    return this.requestSse("/api/agent/v3/create_agent_task", payload);
+    return this.requestSse("/api/agent/v3/create_agent_task", payload, { service: "agent" });
   }
 
   async commitToolcallResult(payload) {
-    return this.requestSse("/api/agent/v3/commit_toolcall_result", payload);
+    return this.requestSse("/api/agent/v3/commit_toolcall_result", payload, {
+      service: "agent",
+    });
   }
 
   async llmRawChat(payload) {
-    return this.requestSse("/api/ide/v2/llm_raw_chat", payload);
+    return this.requestSse("/api/ide/v2/llm_raw_chat", payload, { service: "raw-chat" });
   }
+}
+
+function isRetryableUpstreamMiss(status) {
+  return status === 404 || status === 405;
 }
 
 function resolveWindowsPath(envName, ...fallbackSegments) {

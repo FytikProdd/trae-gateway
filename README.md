@@ -19,18 +19,18 @@ Current status:
 - OpenAI-compatible API surface is implemented
 - raw passthrough to Trae private endpoints is implemented
 - agent-v3 standard chat can now be sent without a captured template using the built-in payload builder
+- session persistence now keeps stable external conversation to Trae `session_id` mappings in a local store
+- SSE parsing now emits OpenAI `tool_calls` when Trae events expose `tool_id` / `tool_type`-style blocks
+- upstream routing now prefers Trae boot domains from the installed `product.json` instead of a single hard-coded host
+- `GET /v1/models` now returns recently observed real Trae models from local Trae logs instead of static placeholders
 - template-based forwarding still exists as a fallback for reverse-engineering and private endpoint drift
 
 What is still missing before `1.0`:
 
 - full tool-call loop: receive tool call, execute it, return result through `/api/agent/v3/commit_toolcall_result`
-- stable Trae SSE/event parsing without heuristic text extraction
-- token refresh and correct handling of expired Trae sessions
-- stable session mapping between OpenAI requests and Trae `session_id` / `task_id` / `message_id`
-- consistent streaming and non-streaming behavior
-- proper upstream error mapping for auth, rate limit, timeout, and invalid payload cases
-- model/capability discovery instead of static placeholder models
-- tests for auth loading, template rendering, SSE parsing, and upstream failure paths
+- token refresh and automatic recovery of expired Trae sessions
+- complete deterministic reuse of Trae `task_id` / `message_id` follow-up state
+- richer tests for auth loading, template rendering, live upstream behavior, and failure paths
 
 Detailed roadmap: [docs/ROADMAP.md](./docs/ROADMAP.md)
 
@@ -77,6 +77,8 @@ Invoke-WebRequest http://127.0.0.1:4317/v1/models
 - `TRAE_RAW_CHAT_TEMPLATE_PATH`
 - `TRAE_STORAGE_PATH`
 - `TRAE_PRODUCT_PATH`
+- `TRAE_SESSION_STORE_PATH`
+- `TRAE_REQUEST_TIMEOUT_MS`
 - `TRAE_DEBUG`
 
 `TRAE_PROXY_MODE` values:
@@ -109,6 +111,8 @@ The gateway replaces placeholders anywhere in the JSON template:
 ## Notes
 
 - Trae uses private endpoints such as `/api/agent/v3/create_agent_task`.
-- The built-in auto payload currently targets standard text chat first; tool execution is still incomplete.
+- The built-in auto payload currently targets standard text chat first; tool execution and result commit are still incomplete.
+- The gateway persists conversation-to-session mapping in `TRAE_SESSION_STORE_PATH` or `.trae-gateway-sessions.json`.
+- `GET /v1/models` is now discovered from recent local Trae activity logs, so the list reflects observed usage rather than a fixed hard-coded catalog.
 - Tool-call continuation usually goes through `/api/agent/v3/commit_toolcall_result`.
-- The gateway includes heuristics for extracting text from Trae SSE chunks, but exact event schemas can vary.
+- Exact Trae SSE schemas still vary, but the parser now handles multi-line SSE frames, stable id extraction, and tool-call block detection.
