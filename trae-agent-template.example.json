@@ -1,0 +1,12 @@
+{
+  "session_id": "{{session_id}}",
+  "task_id": "{{task_id}}",
+  "message_id": "{{message_id}}",
+  "query": "{{prompt}}",
+  "model": "{{model}}",
+  "metadata": {
+    "client": "trae-gateway",
+    "trace_id": "{{trace_id}}",
+    "request_id": "{{request_id}}"
+  }
+}
