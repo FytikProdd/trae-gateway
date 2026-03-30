@@ -39,15 +39,14 @@ Current state:
 
 - raw passthrough for `/api/agent/v3/commit_toolcall_result` exists
 - Trae event parsing can now surface OpenAI-style `tool_calls` when tool metadata is present in upstream events
+- OpenAI follow-up requests with `role: "tool"` can now be translated into an experimental `commit_toolcall_result` payload using stored session/task state
 - there is still no complete OpenAI-compatible tool execution loop
 
 Missing pieces:
 
-- parse tool calls from Trae events
-- expose them in a predictable external format
-- execute tools or hand tool calls to the client
-- send results back through `/api/agent/v3/commit_toolcall_result`
-- continue the same Trae task/session correctly
+- hard-validate the live `agent/v3` commit payload schema against more real Trae sessions
+- execute tools inside the gateway or keep the client handoff contract fully stable
+- continue the same Trae task/session correctly across more edge cases
 
 `1.0` requirement:
 

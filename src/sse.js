@@ -81,14 +81,25 @@ function extractTraeEventDelta(rawData) {
     return {
       contentParts: content ? [content] : [],
       toolCalls: [],
+      toolCallContexts: [],
       ids: {},
       finishReason: null,
     };
   }
 
+  const toolCallContexts = collectToolCallContexts(parsed);
+
   return {
     contentParts: uniqueStrings(collectContentParts(parsed)),
-    toolCalls: collectToolCalls(parsed),
+    toolCalls: toolCallContexts.map((toolCall) => ({
+      id: toolCall.toolcall_id || null,
+      type: "function",
+      function: {
+        name: toolCall.tool_name || "tool",
+        arguments: toolCall.arguments || "{}",
+      },
+    })),
+    toolCallContexts,
     ids: collectIds(parsed),
     finishReason: inferFinishReason(parsed),
   };
@@ -143,14 +154,14 @@ function collectContentParts(node, output = []) {
   return output;
 }
 
-function collectToolCalls(node, output = [], seen = new Set()) {
+function collectToolCallContexts(node, output = [], seen = new Set()) {
   if (node == null) {
     return output;
   }
 
   if (Array.isArray(node)) {
     for (const item of node) {
-      collectToolCalls(item, output, seen);
+      collectToolCallContexts(item, output, seen);
     }
     return output;
   }
@@ -159,12 +170,16 @@ function collectToolCalls(node, output = [], seen = new Set()) {
     return output;
   }
 
-  const toolId = firstString(node.tool_id, node.block_id, node.id);
+  const toolId = firstString(node.toolcall_id, node.tool_id, node.block_id, node.id);
   const toolType = firstString(
+    node.tool_name,
     node.tool_type,
     node.block_type,
     node.name,
     node.function?.name,
+  );
+  const toolArguments = stringifyArguments(
+    firstDefined(node.arguments, node.function?.arguments, node.params, node.input),
   );
 
   if (toolType && (toolId || node.function || node.arguments || node.params || node.input)) {
@@ -172,21 +187,20 @@ function collectToolCalls(node, output = [], seen = new Set()) {
     if (!seen.has(key)) {
       seen.add(key);
       output.push({
-        id: toolId || null,
-        type: "function",
-        function: {
-          name: sanitizeFunctionName(toolType),
-          arguments: stringifyArguments(
-            firstDefined(node.arguments, node.function?.arguments, node.params, node.input),
-          ),
-        },
+        toolcall_id: toolId || null,
+        tool_name: sanitizeFunctionName(toolType),
+        arguments: toolArguments,
+        agent_run_id: firstString(node.agent_run_id),
+        parent_agent_run_id: firstString(node.parent_agent_run_id),
+        require_local_execution: node.require_local_execution === true,
+        file_path: firstString(node.file_path, node.path),
       });
     }
   }
 
   for (const value of Object.values(node)) {
     if (value && typeof value === "object") {
-      collectToolCalls(value, output, seen);
+      collectToolCallContexts(value, output, seen);
     }
   }
 
@@ -208,6 +222,10 @@ function collectIds(node, output = {}) {
 
   if (!output.message_id && typeof node.message_id === "string") {
     output.message_id = node.message_id;
+  }
+
+  if (!output.conversation_id && typeof node.conversation_id === "string") {
+    output.conversation_id = node.conversation_id;
   }
 
   for (const value of Object.values(node)) {

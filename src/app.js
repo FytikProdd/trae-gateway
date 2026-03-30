@@ -6,6 +6,11 @@ const { buildAgentTaskPayload } = require("./agent-task-builder");
 const { ModelDiscovery } = require("./model-discovery");
 const { SessionStore, deriveConversationKey } = require("./session-store");
 const { compactContentParts, extractTraeEventDelta, iterateSseEvents } = require("./sse");
+const {
+  buildCommitToolPayload,
+  isToolResultRequest,
+  mergePendingToolCalls,
+} = require("./tool-call-loop");
 const { TraeClient } = require("./trae-client");
 const {
   createObjectId,
@@ -174,11 +179,12 @@ async function handleOpenAiChat({
   trae,
   sessionStore,
 }) {
-  const prompt = flattenMessages(openaiRequest.messages);
   const stream = openaiRequest.stream === true;
   const model = openaiRequest.model || "trae-agent";
+  const continuationRequest = isToolResultRequest(openaiRequest.messages);
+  const prompt = continuationRequest ? "" : flattenMessages(openaiRequest.messages);
 
-  if (!prompt.trim()) {
+  if (!continuationRequest && !prompt.trim()) {
     return json(response, 400, {
       error: {
         message: "Request does not contain any usable text messages.",
@@ -201,9 +207,20 @@ async function handleOpenAiChat({
   const conversation = conversationKey
     ? sessionStore.ensureConversation(conversationKey, () => ({
         session_id: createObjectId(),
+        conversation_id: createObjectId(),
         turn_count: 0,
       }))
     : null;
+
+  if (continuationRequest && !conversationKey) {
+    return json(response, 400, {
+      error: {
+        message:
+          "Tool result continuation requires a stable conversation key via metadata, headers, or user.",
+        type: "invalid_request_error",
+      },
+    });
+  }
 
   const runtimeVars = {
     prompt,
@@ -216,7 +233,24 @@ async function handleOpenAiChat({
   };
 
   let result;
-  if (config.mode === "agent-v3-auto") {
+  if (continuationRequest) {
+    let commitPayload;
+    try {
+      commitPayload = buildCommitToolPayload({
+        conversation,
+        openaiRequest,
+      });
+    } catch (error) {
+      return json(response, 409, {
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          type: "invalid_request_error",
+        },
+      });
+    }
+
+    result = await trae.commitToolcallResult(commitPayload);
+  } else if (config.mode === "agent-v3-auto") {
     result = await trae.createAgentTask(
       buildAgentTaskPayload({
         openaiRequest,
@@ -252,17 +286,29 @@ async function handleOpenAiChat({
     });
   }
 
-  const persistConversation = (ids) => {
+  const persistConversation = (state) => {
     if (!conversationKey) {
       return;
     }
 
+    const ids = state?.ids || {};
     sessionStore.upsertConversation(conversationKey, {
-      session_id: ids.session_id || runtimeVars.session_id,
-      last_task_id: ids.task_id || runtimeVars.task_id,
-      last_message_id: ids.message_id || runtimeVars.message_id,
+      session_id: ids.session_id || conversation?.session_id || runtimeVars.session_id,
+      conversation_id:
+        ids.conversation_id
+        || conversation?.conversation_id
+        || conversation?.session_id
+        || runtimeVars.session_id,
+      last_task_id: ids.task_id || conversation?.last_task_id || runtimeVars.task_id,
+      last_message_id:
+        ids.message_id || conversation?.last_message_id || runtimeVars.message_id,
       turn_count: Number(conversation?.turn_count || 0) + 1,
       model,
+      user_id:
+        typeof openaiRequest.user === "string" && openaiRequest.user.trim()
+          ? openaiRequest.user.trim()
+          : conversation?.user_id || "",
+      pending_tool_calls: state?.pendingToolCalls || [],
     });
   };
 
@@ -318,7 +364,7 @@ async function proxyTraeSseAsOpenAiJson(response, traeResult, model, persistConv
   }
 
   const aggregate = await collectTraeResponse(traeResult.body);
-  persistConversation?.(aggregate.ids);
+  persistConversation?.(aggregate);
 
   const message = {
     role: "assistant",
@@ -356,11 +402,19 @@ async function proxyTraeSseAsOpenAi(response, traeResult, model, persistConversa
   const completionId = `chatcmpl-${createObjectId()}`;
   let emittedToolCalls = false;
   let lastTextDelta = null;
-  const aggregateIds = {};
+  let toolCallIndex = 0;
+  const aggregateState = {
+    ids: {},
+    pendingToolCalls: [],
+  };
 
   for await (const event of iterateSseEvents(traeResult.body)) {
     const delta = extractTraeEventDelta(event.data);
-    Object.assign(aggregateIds, delta.ids);
+    Object.assign(aggregateState.ids, delta.ids);
+    aggregateState.pendingToolCalls = mergePendingToolCalls(
+      aggregateState.pendingToolCalls,
+      delta.toolCallContexts,
+    );
 
     for (const toolCall of delta.toolCalls) {
       emittedToolCalls = true;
@@ -376,7 +430,7 @@ async function proxyTraeSseAsOpenAi(response, traeResult, model, persistConversa
               delta: {
                 tool_calls: [
                   {
-                    index: 0,
+                    index: toolCallIndex++,
                     id: toolCall.id || undefined,
                     type: "function",
                     function: toolCall.function,
@@ -414,7 +468,7 @@ async function proxyTraeSseAsOpenAi(response, traeResult, model, persistConversa
     }
   }
 
-  persistConversation?.(aggregateIds);
+  persistConversation?.(aggregateState);
   response.write(
     `data: ${JSON.stringify({
       id: completionId,
@@ -437,6 +491,7 @@ async function proxyTraeSseAsOpenAi(response, traeResult, model, persistConversa
 async function collectTraeResponse(stream) {
   const contentParts = [];
   const toolCalls = [];
+  let pendingToolCalls = [];
   const seenToolCalls = new Set();
   const ids = {};
   let finishReason = null;
@@ -446,6 +501,7 @@ async function collectTraeResponse(stream) {
     contentParts.push(...delta.contentParts);
     Object.assign(ids, delta.ids);
     finishReason ||= delta.finishReason;
+    pendingToolCalls = mergePendingToolCalls(pendingToolCalls, delta.toolCallContexts);
 
     for (const toolCall of delta.toolCalls) {
       const key = `${toolCall.id || ""}:${toolCall.function?.name || ""}`;
@@ -460,6 +516,7 @@ async function collectTraeResponse(stream) {
   return {
     content: compactContentParts(contentParts).join("\n"),
     toolCalls,
+    pendingToolCalls,
     ids,
     finishReason,
   };

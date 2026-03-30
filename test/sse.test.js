@@ -25,11 +25,13 @@ test("extractTraeEventDelta returns tool calls and ids", () => {
   const delta = extractTraeEventDelta(
     JSON.stringify({
       session_id: "session-1",
+      conversation_id: "conversation-1",
       task_id: "task-1",
       message_id: "message-1",
-      tool_type: "run_command",
-      tool_id: "tool-1",
-      input: { command: "npm test" },
+      tool_name: "run_command",
+      toolcall_id: "tool-1",
+      agent_run_id: "agent-run-1",
+      arguments: { command: "npm test" },
     }),
   );
 
@@ -43,8 +45,20 @@ test("extractTraeEventDelta returns tool calls and ids", () => {
       },
     },
   ]);
+  assert.deepEqual(delta.toolCallContexts, [
+    {
+      toolcall_id: "tool-1",
+      tool_name: "run_command",
+      arguments: '{"command":"npm test"}',
+      agent_run_id: "agent-run-1",
+      parent_agent_run_id: null,
+      require_local_execution: false,
+      file_path: null,
+    },
+  ]);
   assert.deepEqual(delta.ids, {
     session_id: "session-1",
+    conversation_id: "conversation-1",
     task_id: "task-1",
     message_id: "message-1",
   });

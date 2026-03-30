@@ -21,13 +21,14 @@
 - стандартный `agent-v3` чат теперь можно отправлять без захваченного template через встроенный builder payload'а
 - persistence сессий теперь сохраняет стабильное сопоставление внешнего диалога с Trae `session_id` в локальном store
 - SSE parser теперь умеет отдавать OpenAI `tool_calls`, когда в событиях Trae видны блоки с `tool_id` / `tool_type`
+- follow-up запросы OpenAI с `role: "tool"` теперь переводятся в экспериментальный payload для `/api/agent/v3/commit_toolcall_result`
 - выбор upstream domain теперь опирается на реальные Trae boot domains из установленного `product.json`, а не на один жёстко прошитый host
 - `GET /v1/models` теперь возвращает недавно замеченные реальные модели Trae из локальных Trae логов вместо статических заглушек
 - template-based forwarding оставлен как fallback для реверс-инжиниринга и на случай дрейфа приватной схемы upstream
 
 Что ещё не закрыто до `1.0`:
 
-- полный tool-call loop: принять tool call, выполнить его, вернуть результат через `/api/agent/v3/commit_toolcall_result`
+- полностью добитый tool-call loop: gateway уже умеет продолжать client-driven tool results, но встроенное выполнение tools и живая валидация схемы ещё не завершены
 - refresh токена и автоматическое восстановление протухших Trae-сессий
 - полное детерминированное переиспользование Trae `task_id` / `message_id` / follow-up state
 - более широкие тесты для загрузки auth, template rendering, live upstream поведения и failure paths
@@ -111,7 +112,7 @@ Gateway заменяет плейсхолдеры в любом месте JSON-
 ## Заметки
 
 - Trae использует приватные endpoint'ы, например `/api/agent/v3/create_agent_task`.
-- Встроенный auto-payload сейчас в первую очередь рассчитан на обычный текстовый чат; выполнение tools и commit результатов пока не завершены.
+- Встроенный auto-payload теперь покрывает обычный чат и экспериментальный client-driven путь для tool-result continuation, но server-side выполнение tools пока не реализовано.
 - Gateway сохраняет mapping между разговором и Trae-сессией в `TRAE_SESSION_STORE_PATH` или `.trae-gateway-sessions.json`.
 - `GET /v1/models` теперь строится по недавней локальной активности Trae, поэтому список отражает реально замеченные модели, а не захардкоженный каталог.
 - Продолжение tool call обычно идёт через `/api/agent/v3/commit_toolcall_result`.
