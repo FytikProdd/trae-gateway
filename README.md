@@ -1,5 +1,7 @@
 # Trae Gateway
 
+Languages: [English](./README.md) | [Русский](./README.ru.md)
+
 This project gives you a local HTTP gateway for Trae.
 
 What it does:
