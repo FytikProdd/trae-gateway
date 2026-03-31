@@ -34,8 +34,8 @@
 - полностью добитый tool-call loop: gateway уже умеет продолжать client-driven tool results, но встроенное выполнение tools и живая валидация схемы ещё не завершены
 - refresh токена и автоматическое восстановление протухших Trae-сессий
 - полное детерминированное переиспользование Trae `task_id` / `message_id` / follow-up state
-- live-разрешение model config для выбранной Trae-модели; текущий upstream-блокер всё ещё в том, что внешние `get_detail_param` запросы падают до того, как gateway может получить валидную конфигурацию
-- более широкие тесты для загрузки auth, template rendering, live upstream поведения и failure paths
+- live-разрешение model config для выбранной Trae-модели теперь работает через корректный `get_detail_param` bootstrap, но `agent-v3` path всё ещё требует дополнительного runtime state сверх одного model config
+- покрытие live upstream-интеграции на реальных Trae-сессиях, диагностика malformed upstream payload и recovery-сценарии для refresh auth
 
 Подробный roadmap: [docs/ROADMAP.ru.md](./docs/ROADMAP.ru.md)
 
@@ -45,6 +45,7 @@
 
 - `GET /debug/auth`
 - `GET /debug/detail-param?function=chat_v3`
+- `GET /debug/runtime`
 - `GET /debug/models`
 - `POST /debug/agent/v3/create_agent_task`
 - `POST /debug/agent/v3/commit_toolcall_result`
@@ -52,7 +53,8 @@
 
 2. OpenAI-compatible mode
 
-- направляйте внешние инструменты на `http://127.0.0.1:4317/v1`
+- по умолчанию gateway слушает `http://127.0.0.1:4317/v1`
+- поставьте `TRAE_BIND_HOST=0.0.0.0`, если нужен доступ с другой машины или из контейнера
 - можно передать любой API key, он игнорируется
 - по умолчанию gateway использует режим `agent-v3-auto`
 - template-режимы остаются доступными для реверс-инжиниринга и fallback-сценариев
@@ -60,6 +62,13 @@
 ## Быстрый старт
 
 ```powershell
+node src/index.js
+```
+
+Bind для LAN / внешнего доступа:
+
+```powershell
+$env:TRAE_BIND_HOST="0.0.0.0"
 node src/index.js
 ```
 
@@ -78,11 +87,14 @@ Invoke-WebRequest http://127.0.0.1:4317/v1/models
 ## Переменные окружения
 
 - `PORT`
+- `TRAE_BIND_HOST`
+- `HOST` (алиас для `TRAE_BIND_HOST`)
 - `TRAE_PROXY_MODE`
 - `TRAE_AGENT_TEMPLATE_PATH`
 - `TRAE_RAW_CHAT_TEMPLATE_PATH`
 - `TRAE_STORAGE_PATH`
 - `TRAE_PRODUCT_PATH`
+- `TRAE_LOGS_PATH`
 - `TRAE_SESSION_STORE_PATH`
 - `TRAE_REQUEST_TIMEOUT_MS`
 - `TRAE_DEBUG`
@@ -100,6 +112,7 @@ Gateway заменяет плейсхолдеры в любом месте JSON-
 - `{{prompt}}`
 - `{{model}}`
 - `{{session_id}}`
+- `{{conversation_id}}`
 - `{{task_id}}`
 - `{{message_id}}`
 - `{{trace_id}}`
@@ -117,21 +130,27 @@ Gateway заменяет плейсхолдеры в любом месте JSON-
 ## Заметки
 
 - Trae использует приватные endpoint'ы, например `/api/agent/v3/create_agent_task`.
+- `/health` теперь возвращает `listenHost`, так что можно сразу проверить, слушает gateway только localhost или уже открыт на нужном bind address.
+- Если нужен доступ извне этой машины, поставьте `TRAE_BIND_HOST=0.0.0.0`, направьте удалённый клиент на `http://<ip-этой-машины>:4317/v1` и проверьте, что Windows Firewall или ваш reverse proxy пропускает порт.
 - Встроенный auto-payload теперь покрывает обычный чат и экспериментальный client-driven путь для tool-result continuation, но server-side выполнение tools пока не реализовано.
 - Gateway сохраняет mapping между разговором и Trae-сессией в `TRAE_SESSION_STORE_PATH` или `.trae-gateway-sessions.json`.
 - `GET /v1/models` теперь в первую очередь опирается на локальный Trae state из `C:\Users\Admin\AppData\Roaming\Trae\User\globalStorage\state.vscdb`, а уже потом дополняется наблюдениями из логов.
 - Выбранная builder-модель читается из `*_ai-chat:sessionRelation:globalModelMap`, hints по режиму идут из `*_ai-chat:sessionRelation:globalModeMap`, а каталог моделей берётся из `*_AI.agent.model.model_list_map`.
 - `GET /debug/models` показывает сырое объединённое состояние discovery, которое реально использует gateway.
+- `GET /debug/runtime` читает свежие локальные `ai-agent_*_stdout.log` и сводит оставшийся desktop-runtime блокер на основе реальных сигналов Trae.
 - Если клиент отправляет `model: "trae-agent"` или вообще не передаёт `model`, gateway теперь автоматически использует выбранную в Trae builder-модель.
 - Продолжение tool call обычно идёт через `/api/agent/v3/commit_toolcall_result`.
 - Точные схемы Trae SSE всё ещё требуют стабилизации, но parser уже умеет разбирать multi-line SSE frames, вытаскивать стабильные id и распознавать tool-call блоки.
-- Текущий live upstream-блокер всё ещё в bootstrap model config: прямые внешние вызовы `get_detail_param` возвращают `HTTP 400` с пустым body, а chat path затем отдаёт `model config is empty for model name: <selected-model>`.
+- Проверено 31 марта 2026 года: прямые внешние вызовы `get_detail_param` больше не требуют старого `mode_type: "Max"` / `agent_type: "builder_v3"` bootstrap и могут возвращать валидный `config_info_list`.
+- Оставшийся live-блокер в `agent-v3` глубже: если подставить resolved runtime `model_name`, upstream уже проходит стадию `model config is empty`, но затем упирается в `failed to get summary config`, то есть desktop Trae использует дополнительный приватный runtime context сверх одного model config.
+- Практически это значит следующее: если gateway уже доступен с другой машины, но `/v1/chat/completions` всё ещё отвечает `failed to get summary config`, то сеть больше не главный блокер; для этой сборки Trae нужен `TRAE_PROXY_MODE=agent-v3-template` с захваченным реальным payload.
 
 ## Подтверждённые runtime-наблюдения
 
-Проверено 30 марта 2026 года:
+Проверено 31 марта 2026 года:
 
 - локальный Trae state уже содержит активную builder-модель и большую часть реально доступного каталога моделей, так что discovery больше не зависит только от renderer logs
 - gateway теперь резолвит дефолтную OpenAI-модель из той же выбранной builder-модели Trae, которую использует desktop app
 - на этой машине `trae-agent` сейчас резолвится в `gemini-3.1-pro`
-- оставшийся блокер теперь не в выборе модели, а в отсутствии живого bootstrap model config из приватного runtime Trae
+- выбранный model config теперь можно получить внешне через `get_detail_param`, так что bootstrap модели больше не является главным блокером
+- оставшийся блокер теперь в полном воссоздании desktop `agent-v3` runtime для внешних запросов

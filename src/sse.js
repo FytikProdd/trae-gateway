@@ -105,6 +105,21 @@ function extractTraeEventDelta(rawData) {
   };
 }
 
+function extractTraeSseError(event) {
+  if (!event || event.event !== "error") {
+    return null;
+  }
+
+  const parsed = parseJson(event.data, null);
+  const message = firstString(parsed?.message, parsed?.error?.message, event.data);
+
+  return {
+    code: typeof parsed?.code === "number" ? parsed.code : null,
+    message: message || "Trae upstream emitted an error event.",
+    data: parsed?.extra ?? parsed ?? null,
+  };
+}
+
 function collectContentParts(node, output = []) {
   if (node == null) {
     return output;
@@ -344,5 +359,6 @@ function firstDefined(...values) {
 module.exports = {
   compactContentParts,
   extractTraeEventDelta,
+  extractTraeSseError,
   iterateSseEvents,
 };

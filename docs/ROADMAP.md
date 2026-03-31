@@ -112,6 +112,7 @@ Current state:
 - upstream errors are now mapped into explicit auth, rate limit, timeout, server, and invalid request classes
 - request timeout handling is now built into the client
 - endpoint routing now falls back across Trae boot domains from the installed product config
+- `GET /debug/runtime` now summarizes recent local ai-agent log evidence so the remaining desktop-runtime blocker is visible without manually grepping Trae logs
 
 Missing pieces:
 
@@ -137,7 +138,7 @@ Current state:
 
 Missing pieces:
 
-- fetch the live model config that Trae itself associates with the selected model
+- fetch the live model config that Trae itself associates with the selected model, then reconstruct the missing desktop runtime context that `agent-v3` expects
 - describe capabilities such as tool use, multimodal support, and reasoning support
 - remove the remaining dependency on reverse-engineered config bootstrap
 
@@ -147,34 +148,30 @@ Missing pieces:
 
 ## Confirmed runtime blocker
 
-Validated on March 30, 2026:
+Validated on March 31, 2026:
 
 - the selected model can now be read locally from Trae state and used as the gateway default
 - on this machine that default resolves to `gemini-3.1-pro`
-- direct external `get_detail_param` calls still fail with `HTTP 400` and an empty body
-- because of that, the chat path still collapses into `model config is empty for model name: gemini-3.1-pro`
+- direct external `get_detail_param` calls now work as long as the old forced `mode_type` / `agent_type` fields are not sent
+- once the resolved runtime `model_name` is used, the chat path moves deeper and now fails with `failed to get summary config`
 
 Practical implication:
 
-- model discovery is no longer the main `1.0` blocker
-- the remaining blocker is obtaining the same live model-config payload that the Trae desktop runtime already knows how to access internally
+- model discovery and model-config bootstrap are no longer the main `1.0` blockers
+- the remaining blocker is reconstructing the extra prompt/summary/runtime context that the Trae desktop app uses on top of `get_detail_param`
 
 ### 8. Tests
 
 Current state:
 
-- automated tests now cover payload generation, SSE parsing, session persistence, and log-based model discovery
+- automated tests now cover payload generation, `.env`/config loading, server startup smoke paths, auth loading/state checks, template rendering, OpenAI streaming and non-streaming adapters, tool-result continuation, upstream error mapping, SSE parsing, session persistence, and log-based model discovery
 
 Minimum test coverage for `1.0`:
 
-- auth loading from Trae storage
-- product/domain loading
-- `.env` loading
-- template rendering
-- SSE parsing
-- OpenAI streaming adapter
-- non-streaming adapter
-- upstream error mapping
+- real upstream integration coverage against recorded or live Trae sessions
+- malformed template and malformed upstream payload diagnostics
+- auth refresh and expiry recovery paths
+- full tool-call request/execute/commit coverage
 
 ## Suggested milestones
 
@@ -183,7 +180,7 @@ Minimum test coverage for `1.0`:
 - keep current debug endpoints stable
 - improve request/response logging with secret redaction
 - document template capture workflow more precisely
-- add smoke tests for server startup and auth loading
+- expand coverage around live upstream behavior and malformed payload diagnostics
 
 ## `0.5`
 

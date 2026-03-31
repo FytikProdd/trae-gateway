@@ -5,7 +5,12 @@ const path = require("node:path");
 const { buildAgentTaskPayload } = require("./agent-task-builder");
 const { ModelDiscovery } = require("./model-discovery");
 const { SessionStore, deriveConversationKey } = require("./session-store");
-const { compactContentParts, extractTraeEventDelta, iterateSseEvents } = require("./sse");
+const {
+  compactContentParts,
+  extractTraeEventDelta,
+  extractTraeSseError,
+  iterateSseEvents,
+} = require("./sse");
 const {
   buildCommitToolPayload,
   isToolResultRequest,
@@ -24,6 +29,14 @@ const {
   sseHeaders,
   toUnixSeconds,
 } = require("./utils");
+
+class GatewayError extends Error {
+  constructor(status, type, message) {
+    super(message);
+    this.status = status;
+    this.type = type;
+  }
+}
 
 function loadDotEnv(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -63,6 +76,7 @@ function loadDotEnv(filePath) {
 function createConfig(env = process.env, cwd = process.cwd()) {
   return {
     cwd,
+    host: normalizeListenHost(env.TRAE_BIND_HOST || env.HOST),
     port: Number(env.PORT || 4317),
     debug: String(env.TRAE_DEBUG || "true").toLowerCase() !== "false",
     mode: env.TRAE_PROXY_MODE || "agent-v3-auto",
@@ -70,6 +84,7 @@ function createConfig(env = process.env, cwd = process.cwd()) {
     rawChatTemplatePath: resolveIfSet(env.TRAE_RAW_CHAT_TEMPLATE_PATH, cwd),
     storagePath: resolveIfSet(env.TRAE_STORAGE_PATH, cwd),
     productPath: resolveIfSet(env.TRAE_PRODUCT_PATH, cwd),
+    logsPath: resolveIfSet(env.TRAE_LOGS_PATH, cwd),
     sessionStorePath:
       resolveIfSet(env.TRAE_SESSION_STORE_PATH, cwd)
       || path.resolve(cwd, ".trae-gateway-sessions.json"),
@@ -77,15 +92,22 @@ function createConfig(env = process.env, cwd = process.cwd()) {
   };
 }
 
-function createGateway(config = createConfig()) {
-  const trae = new TraeClient({
+function createGateway(config = createConfig(), dependencies = {}) {
+  config = {
+    host: "127.0.0.1",
+    ...config,
+  };
+
+  const trae = dependencies.trae || new TraeClient({
     storagePath: config.storagePath,
     productPath: config.productPath,
+    logsPath: config.logsPath,
     debug: config.debug,
     requestTimeoutMs: config.requestTimeoutMs,
   });
-  const sessionStore = new SessionStore({ filePath: config.sessionStorePath });
-  const modelDiscovery = new ModelDiscovery({});
+  const sessionStore =
+    dependencies.sessionStore || new SessionStore({ filePath: config.sessionStorePath });
+  const modelDiscovery = dependencies.modelDiscovery || new ModelDiscovery({});
 
   const server = http.createServer(async (request, response) => {
     try {
@@ -94,28 +116,46 @@ function createGateway(config = createConfig()) {
       if (request.method === "GET" && url.pathname === "/health") {
         return json(response, 200, {
           ok: true,
+          listenHost: config.host,
           mode: config.mode,
-          baseDomain: trae.getBaseDomain("agent"),
+          baseDomain: tryGetBaseDomain(trae, "agent"),
         });
       }
 
       if (request.method === "GET" && url.pathname === "/debug/auth") {
         return json(response, 200, {
           ok: true,
-          baseDomain: trae.getBaseDomain("agent"),
-          auth: sanitizeAuthInfo(trae.readAuth()),
+          baseDomain: tryGetBaseDomain(trae, "agent"),
+          auth: sanitizeAuthInfo(tryReadAuth(trae)),
         });
       }
 
       if (request.method === "GET" && url.pathname === "/debug/detail-param") {
         const functionName = url.searchParams.get("function") || "chat_v3";
-        const result = await trae.getDetailParam(functionName);
+        const configName = url.searchParams.get("config_name") || null;
+        const modelName = url.searchParams.get("model_name") || null;
+        const result = await trae.getDetailParam(functionName, {
+          configName,
+          modelName,
+          needPrompt: url.searchParams.get("need_prompt") !== "false",
+          useCurrentConfig: url.searchParams.get("use_current_config") === "true",
+        });
         return json(response, result.status, {
           ok: result.ok,
           url: result.url,
           data: result.data,
           text: result.data ? undefined : result.text,
         });
+      }
+
+      if (request.method === "GET" && url.pathname === "/debug/runtime") {
+        const runtime = typeof trae.getRuntimeDiagnostics === "function"
+          ? await trae.getRuntimeDiagnostics()
+          : {
+              ok: false,
+              message: "Runtime diagnostics are unavailable for the current Trae client.",
+            };
+        return json(response, 200, runtime);
       }
 
       if (request.method === "GET" && url.pathname === "/v1/models") {
@@ -134,22 +174,22 @@ function createGateway(config = createConfig()) {
 
       if (request.method === "POST" && url.pathname === "/debug/agent/v3/create_agent_task") {
         const body = await readJsonBody(request);
-        return proxyRawSse(response, await trae.createAgentTask(body));
+        return await proxyRawSse(response, await trae.createAgentTask(body));
       }
 
       if (request.method === "POST" && url.pathname === "/debug/agent/v3/commit_toolcall_result") {
         const body = await readJsonBody(request);
-        return proxyRawSse(response, await trae.commitToolcallResult(body));
+        return await proxyRawSse(response, await trae.commitToolcallResult(body));
       }
 
       if (request.method === "POST" && url.pathname === "/debug/ide/v2/llm_raw_chat") {
         const body = await readJsonBody(request);
-        return proxyRawSse(response, await trae.llmRawChat(body));
+        return await proxyRawSse(response, await trae.llmRawChat(body));
       }
 
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         const openaiRequest = await readJsonBody(request);
-        return handleOpenAiChat({
+        return await handleOpenAiChat({
           response,
           openaiRequest,
           requestHeaders: request.headers,
@@ -167,6 +207,15 @@ function createGateway(config = createConfig()) {
         },
       });
     } catch (error) {
+      if (error instanceof GatewayError) {
+        return json(response, error.status, {
+          error: {
+            message: error.message,
+            type: error.type,
+          },
+        });
+      }
+
       return json(response, 500, {
         error: {
           message: error instanceof Error ? error.message : String(error),
@@ -241,7 +290,31 @@ async function handleOpenAiChat({
     trace_id: createTraceId(),
     request_id: createRequestId(),
   };
-  const runtimeProfile = trae.getRuntimeProfile({ defaultModel: model });
+  let runtimeProfile = trae.getRuntimeProfile({ defaultModel: model });
+  let upstreamModel = model;
+
+  if (!continuationRequest && config.mode === "agent-v3-auto" && typeof trae.resolveModelConfig === "function") {
+    try {
+      const resolved = await trae.resolveModelConfig("chat_v3", {
+        model,
+        configName: typeof openaiRequest?.config_name === "string" ? openaiRequest.config_name : null,
+      });
+
+      if (resolved.resolvedModelName) {
+        upstreamModel = resolved.resolvedModelName;
+      }
+
+      if (resolved.resolvedConfigName || resolved.resolvedModelName) {
+        runtimeProfile = {
+          ...runtimeProfile,
+          defaultModel: resolved.resolvedModelName || runtimeProfile.defaultModel,
+          defaultConfigName: resolved.resolvedConfigName || runtimeProfile.defaultConfigName,
+        };
+      }
+    } catch {
+      // Keep the original model selection if live config resolution fails.
+    }
+  }
 
   let result;
   if (continuationRequest) {
@@ -267,7 +340,7 @@ async function handleOpenAiChat({
         openaiRequest,
         runtimeVars,
         prompt,
-        model,
+        model: upstreamModel,
         profile: runtimeProfile,
       }),
     );
@@ -349,8 +422,34 @@ function resolveRequestedModel(requestedModel, discoveredModels) {
   return firstRealModel?.id || "gemini-3.1-pro";
 }
 
+function tryGetBaseDomain(trae, service) {
+  try {
+    return trae.getBaseDomain(service);
+  } catch {
+    return null;
+  }
+}
+
+function tryReadAuth(trae) {
+  try {
+    return trae.readAuth();
+  } catch {
+    return null;
+  }
+}
+
 function buildTemplatePayload(templatePath, runtimeVars) {
-  const template = JSON.parse(fs.readFileSync(templatePath, "utf8"));
+  let template;
+  try {
+    template = JSON.parse(fs.readFileSync(templatePath, "utf8"));
+  } catch (error) {
+    throw new GatewayError(
+      500,
+      "configuration_error",
+      `Template file is not valid JSON: ${templatePath}`,
+    );
+  }
+
   return deepReplace(template, runtimeVars);
 }
 
@@ -365,7 +464,15 @@ function missingTemplateError(envName, endpoint) {
 
 async function readJsonBody(request) {
   const raw = await readTextBody(request);
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new GatewayError(400, "invalid_request_error", "Request body must be valid JSON.");
+  }
 }
 
 async function readTextBody(request) {
@@ -394,6 +501,10 @@ async function proxyTraeSseAsOpenAiJson(response, traeResult, model, persistConv
   }
 
   const aggregate = await collectTraeResponse(traeResult.body);
+  if (aggregate.error) {
+    return writeMappedTraeSseError(response, aggregate.error);
+  }
+
   persistConversation?.(aggregate);
 
   const message = {
@@ -426,19 +537,41 @@ async function proxyTraeSseAsOpenAi(response, traeResult, model, persistConversa
     return writeMappedUpstreamError(response, traeResult);
   }
 
-  response.writeHead(200, sseHeaders());
-
   const created = toUnixSeconds();
   const completionId = `chatcmpl-${createObjectId()}`;
   let emittedToolCalls = false;
   let lastTextDelta = null;
   let toolCallIndex = 0;
+  let started = false;
   const aggregateState = {
     ids: {},
     pendingToolCalls: [],
   };
 
   for await (const event of iterateSseEvents(traeResult.body)) {
+    const upstreamError = extractTraeSseError(event);
+    if (upstreamError) {
+      if (!started) {
+        return writeMappedTraeSseError(response, upstreamError);
+      }
+
+      response.write(
+        `data: ${JSON.stringify({
+          id: completionId,
+          object: "error",
+          error: mapTraeSseError(upstreamError),
+        })}\n\n`,
+      );
+      response.write("data: [DONE]\n\n");
+      response.end();
+      return;
+    }
+
+    if (!started) {
+      response.writeHead(200, sseHeaders());
+      started = true;
+    }
+
     const delta = extractTraeEventDelta(event.data);
     Object.assign(aggregateState.ids, delta.ids);
     aggregateState.pendingToolCalls = mergePendingToolCalls(
@@ -498,6 +631,10 @@ async function proxyTraeSseAsOpenAi(response, traeResult, model, persistConversa
     }
   }
 
+  if (!started) {
+    response.writeHead(200, sseHeaders());
+  }
+
   persistConversation?.(aggregateState);
   response.write(
     `data: ${JSON.stringify({
@@ -527,6 +664,18 @@ async function collectTraeResponse(stream) {
   let finishReason = null;
 
   for await (const event of iterateSseEvents(stream)) {
+    const upstreamError = extractTraeSseError(event);
+    if (upstreamError) {
+      return {
+        content: compactContentParts(contentParts).join("\n"),
+        toolCalls,
+        pendingToolCalls,
+        ids,
+        finishReason,
+        error: upstreamError,
+      };
+    }
+
     const delta = extractTraeEventDelta(event.data);
     contentParts.push(...delta.contentParts);
     Object.assign(ids, delta.ids);
@@ -549,6 +698,7 @@ async function collectTraeResponse(stream) {
     pendingToolCalls,
     ids,
     finishReason,
+    error: null,
   };
 }
 
@@ -560,6 +710,42 @@ function writeMappedUpstreamError(response, traeResult) {
       type: error.type,
     },
   });
+}
+
+function writeMappedTraeSseError(response, traeSseError) {
+  const error = mapTraeSseError(traeSseError);
+  return json(response, error.status, {
+    error: {
+      message: error.message,
+      type: error.type,
+    },
+  });
+}
+
+function mapTraeSseError(traeSseError) {
+  const code = Number(traeSseError?.code);
+  let message = typeof traeSseError?.message === "string" && traeSseError.message.trim()
+    ? traeSseError.message.trim()
+    : "Trae upstream emitted an error event.";
+
+  if (/failed to get summary config/i.test(message)) {
+    message =
+      "Trae agent-v3 runtime is still incomplete for direct external calls in this build: failed to get summary config. Capture a real /api/agent/v3/create_agent_task payload and use TRAE_PROXY_MODE=agent-v3-template.";
+  }
+
+  if (code >= 4000 && code < 5000) {
+    return {
+      status: 400,
+      type: "invalid_request_error",
+      message,
+    };
+  }
+
+  return {
+    status: 502,
+    type: "server_error",
+    message,
+  };
 }
 
 function mapUpstreamError(traeResult) {
@@ -618,6 +804,10 @@ function resolveIfSet(value, cwd) {
   }
 
   return path.isAbsolute(value) ? value : path.resolve(cwd, value);
+}
+
+function normalizeListenHost(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "127.0.0.1";
 }
 
 module.exports = {

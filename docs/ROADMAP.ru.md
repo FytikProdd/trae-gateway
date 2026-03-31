@@ -112,6 +112,7 @@
 - upstream-ошибки теперь раскладываются на явные auth, rate limit, timeout, server и invalid request классы
 - обработка request timeout теперь встроена в client
 - routing endpoint'ов теперь умеет fallback по нескольким Trae boot domains из установленного product config
+- `GET /debug/runtime` теперь сводит свежие сигналы из локальных ai-agent логов, так что оставшийся desktop-runtime блокер виден без ручного grep по Trae logs
 
 Чего не хватает:
 
@@ -137,7 +138,7 @@
 
 Чего не хватает:
 
-- получать живой model config, который сам Trae связывает с выбранной моделью
+- получать живой model config, который сам Trae связывает с выбранной моделью, и затем дособирать недостающий desktop runtime context для `agent-v3`
 - описывать возможности вроде tool use, multimodal support и reasoning support
 - убрать остаточную зависимость от reverse-engineered bootstrap конфигурации
 
@@ -147,34 +148,30 @@
 
 ## Подтверждённый runtime-блокер
 
-Проверено 30 марта 2026 года:
+Проверено 31 марта 2026 года:
 
 - выбранную модель теперь можно читать локально из Trae state и использовать как дефолт gateway
 - на этой машине такой дефолт сейчас резолвится в `gemini-3.1-pro`
-- прямые внешние вызовы `get_detail_param` всё ещё падают с `HTTP 400` и пустым body
-- из-за этого chat path по-прежнему упирается в `model config is empty for model name: gemini-3.1-pro`
+- прямые внешние вызовы `get_detail_param` теперь работают, если не форсировать старые `mode_type` / `agent_type` поля
+- после подстановки resolved runtime `model_name` chat path уходит глубже и теперь упирается в `failed to get summary config`
 
 Практический вывод:
 
-- discovery моделей больше не является главным блокером `1.0`
-- оставшийся блокер в том, чтобы получить тот же живой model-config payload, который desktop runtime Trae уже умеет доставать внутри себя
+- discovery моделей и bootstrap model config больше не являются главным блокером `1.0`
+- оставшийся блокер в том, чтобы восстановить тот дополнительный prompt/summary/runtime context, который desktop Trae использует поверх `get_detail_param`
 
 ### 8. Тесты
 
 Текущее состояние:
 
-- автоматизированные тесты теперь покрывают payload generation, SSE parsing, session persistence и log-based model discovery
+- автоматизированные тесты теперь покрывают payload generation, загрузку `.env` и config, smoke paths запуска сервера, загрузку и проверку auth state, template rendering, OpenAI streaming и non-streaming adapters, tool-result continuation, upstream error mapping, SSE parsing, session persistence и log-based model discovery
 
 Минимальное покрытие для `1.0`:
 
-- загрузка auth из Trae storage
-- загрузка product/domain
-- загрузка `.env`
-- template rendering
-- SSE parsing
-- OpenAI streaming adapter
-- non-streaming adapter
-- upstream error mapping
+- покрытие реальной upstream-интеграции на recorded или live Trae-сессиях
+- диагностика malformed template и malformed upstream payload
+- recovery-сценарии для refresh и expiry auth
+- полное покрытие tool-call цикла request/execute/commit
 
 ## Предлагаемые milestones
 
@@ -183,7 +180,7 @@
 - сохранить стабильность текущих debug endpoints
 - улучшить логирование запросов/ответов с редактированием секретов
 - точнее задокументировать workflow захвата template
-- добавить smoke-тесты на запуск сервера и загрузку auth
+- расширить покрытие вокруг live upstream-поведения и диагностики malformed payload
 
 ## `0.5`
 

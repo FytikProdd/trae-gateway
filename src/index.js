@@ -7,8 +7,8 @@ loadDotEnv(path.resolve(process.cwd(), ".env"));
 const config = createConfig();
 const { server, trae } = createGateway(config);
 
-server.listen(config.port, "127.0.0.1", () => {
-  console.log(`Trae gateway listening on http://127.0.0.1:${config.port}`);
+server.listen(config.port, config.host, () => {
+  console.log(`Trae gateway listening on http://${config.host}:${config.port}`);
   console.log(`Mode: ${config.mode}`);
 
   try {
